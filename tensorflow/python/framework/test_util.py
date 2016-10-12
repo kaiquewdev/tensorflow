@@ -45,6 +45,14 @@ from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.util import compat
 from tensorflow.python.util.protobuf import compare
 
+def node_in_gd(node, gd):
+  return node in gd.node
+
+def node_name_in_expected_ops(node, expected_ops):
+  return node.name in expected_ops
+
+def unexpected_node_op_in_ops(node, expected_ops):
+  return expected_ops[node.name] != node.op
 
 def assert_ops_in_graph(expected_ops, graph):
   """Assert all expected operations are found.
@@ -60,9 +68,9 @@ def assert_ops_in_graph(expected_ops, graph):
   """
   actual_ops = {}
   gd = graph.as_graph_def()
-  for node in gd.node:
-    if node.name in expected_ops:
-      if expected_ops[node.name] != node.op:
+  for node_in_gd(node, gd):
+    if node_name_in_expected_ops(node, expected_ops):
+      if unexpected_node_op_in_ops(node, expeted_ops):
         raise ValueError(
             "Expected op for node %s is different. %s vs %s" % (
                 node.name, expected_ops[node.name], node.op))
@@ -236,13 +244,19 @@ class TensorFlowTestCase(googletest.TestCase):
       A Session object that should be used as a context manager to surround
       the graph building and execution code in a test case.
     """
-    if self.id().endswith(".test_session"):
+    GPU_MEMORY_FRACT = .3
+    endswith_test_session = lambda id: id.endswith('.test_session')
+    is_none = lambda a: a is None
+    is_not_none = lambda b: not is_none(b)
+    releaf_gpu = lambda fg: not fg
+
+    if endswith_test_session(self.id()):
       self.skipTest("Not a test.")
     def prepare_config(config):
-      if config is None:
+      if is_none(config):
         config = config_pb2.ConfigProto()
-        config.allow_soft_placement = not force_gpu
-        config.gpu_options.per_process_gpu_memory_fraction = 0.3
+        config.allow_soft_placement = releaf_gpu(force_gpu)
+        config.gpu_options.per_process_gpu_memory_fraction = GPU_MEMORY_FRACT
       elif force_gpu and config.allow_soft_placement:
         config = config_pb2.ConfigProto().CopyFrom(config)
         config.allow_soft_placement = False
@@ -251,8 +265,8 @@ class TensorFlowTestCase(googletest.TestCase):
       config.graph_options.optimizer_options.opt_level = -1
       return config
 
-    if graph is None:
-      if self._cached_session is None:
+    if is_none(graph):
+      if is_none(self._cached_session):
         self._cached_session = session.Session(graph=None,
                                                config=prepare_config(config))
       sess = self._cached_session
@@ -296,8 +310,8 @@ class TensorFlowTestCase(googletest.TestCase):
       """
       self._testcase = testcase
       self._target = target
-      self._args = () if args is None else args
-      self._kwargs = {} if kwargs is None else kwargs
+      self._args = () if is_none(args) else args
+      self._kwargs = {} if is_none(kwargs) else kwargs
       self._thread = threading.Thread(target=self._protected_run)
       self._exception = None
 
@@ -324,7 +338,7 @@ class TensorFlowTestCase(googletest.TestCase):
           an exception.
       """
       self._thread.join()
-      if self._exception is not None:
+      if is_not_none(self._exception):
         self._testcase.fail(
             "Error in checkedThread: %s" % str(self._exception))
 
