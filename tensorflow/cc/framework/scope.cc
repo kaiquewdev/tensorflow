@@ -29,11 +29,13 @@ Scope::Scope(Graph* graph, Status* status, Scope::NameMap* name_map,
       status_(status),
       name_map_(name_map),
       refiner_(refiner),
-      scope_used_(nullptr) {}
+      scope_used_(nullptr),
+      colocation_constraints_() {}
 
 Scope Scope::NewRootScope() {
-  return Scope(new Graph(OpRegistry::Global()), new Status, new Scope::NameMap,
-               new ShapeRefiner);
+  Graph* graph = new Graph(OpRegistry::Global());
+  ShapeRefiner* refiner = new ShapeRefiner(graph->op_registry());
+  return Scope(graph, new Status, new Scope::NameMap, refiner);
 }
 
 Scope::Scope(const Scope& other, Scope::Tags::ScopeName, const string& name,
@@ -184,7 +186,7 @@ std::unordered_set<string> Scope::GetColocationConstraints(
 void Scope::UpdateStatus(const Status s) const {
   status_->Update(s);
   if (exit_on_error_ && !status_->ok()) {
-    LOG(FATAL) << status_;
+    LOG(FATAL) << *status_;
   }
 }
 

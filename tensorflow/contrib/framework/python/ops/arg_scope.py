@@ -33,7 +33,7 @@
   The first call to conv2d will use predefined args:
     layers.conv2d(inputs, 64, [11, 11], 4, padding='VALID', ..., scope='conv1')
 
-  The second call to Conv will overwrite padding:
+  The second call to conv2d will overwrite padding:
     layers.conv2d(inputs, 256, [5, 5], padding='SAME', ..., scope='conv2')
 
   Example of how to reuse an arg_scope:
@@ -110,9 +110,9 @@ def arg_scope(list_ops_or_scope, **kwargs):
 
   Args:
     list_ops_or_scope: List or tuple of operations to set argument scope for or
-      a dictionary containg the current scope. When list_ops_or_scope is a dict,
-      kwargs must be empty. When list_ops_or_scope is a list or tuple, then
-      every op in it need to be decorated with @add_arg_scope to work.
+      a dictionary containing the current scope. When list_ops_or_scope is a
+      dict, kwargs must be empty. When list_ops_or_scope is a list or tuple,
+      then every op in it need to be decorated with @add_arg_scope to work.
     **kwargs: keyword=value that will define the defaults for each op in
               list_ops. All the ops need to accept the given set of arguments.
 

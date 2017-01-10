@@ -117,8 +117,6 @@ void FindConstantFoldableNodes(const Graph* graph,
   }
 }
 
-typedef std::pair<Node*, int> NodeAndOutput;
-
 // Given the constant foldable nodes in 'nodes', returns a new graph 'g'. 'g'
 // will contain copies of the nodes in 'nodes'. In addition, if there is an edge
 // going from a node 'n' in 'nodes' to another node in 'orig_graph' but not in
@@ -254,6 +252,16 @@ bool ReplaceTensorWithConstant(Graph* graph, Device* partition_device,
 bool DoConstantFolding(const ConstantFoldingOptions& opts,
                        FunctionLibraryRuntime* function_library, Env* env,
                        Device* partition_device, Graph* graph) {
+  bool was_mutated;
+  Status unused_status = DoConstantFoldingWithStatus(
+      opts, function_library, env, partition_device, graph, &was_mutated);
+  return was_mutated;
+}
+
+Status DoConstantFoldingWithStatus(const ConstantFoldingOptions& opts,
+                                   FunctionLibraryRuntime* function_library,
+                                   Env* env, Device* partition_device,
+                                   Graph* graph, bool* was_mutated) {
   DumpGraph("Before", graph);
 
   const FunctionLibraryDefinition* flib_def = nullptr;
@@ -265,7 +273,9 @@ bool DoConstantFolding(const ConstantFoldingOptions& opts,
   FindConstantFoldableNodes(graph, flib_def, opts, &constant_foldable_nodes);
   if (constant_foldable_nodes.empty()) {
     VLOG(1) << "No constant foldable nodes found";
-    return false;
+    *was_mutated = false;
+    // This is not an error, so return the status as OK.
+    return Status::OK();
   }
 
   std::map<NodeAndOutput, Node*> tensors_to_fetch;
@@ -275,7 +285,9 @@ bool DoConstantFolding(const ConstantFoldingOptions& opts,
 
   if (tensors_to_fetch.empty()) {
     VLOG(1) << "No constant nodes found that feed into the original graph.";
-    return false;
+    *was_mutated = false;
+    // This is not an error, so return the status as OK.
+    return Status::OK();
   }
   VLOG(1) << "Constant foldable " << constant_graph->num_node_ids() << " : "
           << graph->num_node_ids();
@@ -294,7 +306,9 @@ bool DoConstantFolding(const ConstantFoldingOptions& opts,
                               {} /* inputs*/, tensors_to_fetch_names, &outputs);
   if (!s.ok()) {
     VLOG(1) << "Could not fetch constants: " << s;
-    return false;
+    *was_mutated = false;
+    // This is not an error, so return the status as OK.
+    return s;
   }
 
   // Fetch the constant tensors and replace the corresponding tensors in the
@@ -309,7 +323,8 @@ bool DoConstantFolding(const ConstantFoldingOptions& opts,
 
   DumpGraph("After", graph);
 
-  return num_nodes_replaced > 0;
+  *was_mutated = (num_nodes_replaced > 0);
+  return Status::OK();
 }
 
 }  // namespace tensorflow
