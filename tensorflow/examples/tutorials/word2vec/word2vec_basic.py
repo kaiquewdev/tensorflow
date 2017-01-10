@@ -44,7 +44,8 @@ def maybe_download(filename, expected_bytes):
         'Failed to verify ' + filename + '. Can you get to it with a browser?')
   return filename
 
-filename = maybe_download('text8.zip', 31344016)
+#filename = maybe_download('./text8.zip', 31344016)
+filename = 'text8.zip'
 
 
 # Read the data into a list of strings.
