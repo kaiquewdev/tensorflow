@@ -18,17 +18,18 @@ from __future__ import division
 from __future__ import print_function
 
 from tensorflow.contrib import framework as contrib_framework
-from tensorflow.contrib.framework.python.framework import experimental
 from tensorflow.contrib.learn.python.learn import evaluable
 from tensorflow.contrib.learn.python.learn import trainable
 
 from tensorflow.contrib.learn.python.learn.estimators import estimator
+from tensorflow.contrib.learn.python.learn.estimators import model_fn as model_fn_lib
 from tensorflow.contrib.learn.python.learn.utils import export
 
 from tensorflow.contrib.tensor_forest.client import eval_metrics
 from tensorflow.contrib.tensor_forest.python import tensor_forest
 
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import state_ops
@@ -98,9 +99,10 @@ class TensorForestLossHook(session_run_hook.SessionRunHook):
 
 
 def get_model_fn(params, graph_builder_class, device_assigner,
-                 weights_name=None, keys_name=None):
+                 weights_name=None, keys_name=None, num_trainers=1,
+                 trainer_id=0):
   """Return a model function given a way to construct a graph builder."""
-  def _model_fn(features, labels):
+  def _model_fn(features, labels, mode):
     """Function that returns predictions, training loss, and training op."""
     weights = None
     keys = None
@@ -110,27 +112,37 @@ def get_model_fn(params, graph_builder_class, device_assigner,
       keys = features.pop(keys_name)
 
     graph_builder = graph_builder_class(params, device_assigner=device_assigner)
-    inference = {
-        eval_metrics.INFERENCE_PROB_NAME:
-            graph_builder.inference_graph(features)
-    }
-    if not params.regression:
-      inference[eval_metrics.INFERENCE_PRED_NAME] = math_ops.argmax(
-          inference[eval_metrics.INFERENCE_PROB_NAME], 1)
-    if keys:
-      inference[KEYS_NAME] = keys
+    inference = {}
+    if (mode == model_fn_lib.ModeKeys.EVAL or
+        mode == model_fn_lib.ModeKeys.INFER):
+      inference[eval_metrics.INFERENCE_PROB_NAME] = (
+          graph_builder.inference_graph(features))
+
+      if not params.regression:
+        inference[eval_metrics.INFERENCE_PRED_NAME] = math_ops.argmax(
+            inference[eval_metrics.INFERENCE_PROB_NAME], 1)
+      if keys:
+        inference[KEYS_NAME] = keys
 
     # labels might be None if we're doing prediction (which brings up the
     # question of why we force everything to adhere to a single model_fn).
-    training_loss = None
+    loss_deps = []
     training_graph = None
-    if labels is not None:
-      training_loss = graph_builder.training_loss(
-          features, labels, name=LOSS_NAME)
+    if labels is not None and mode == model_fn_lib.ModeKeys.TRAIN:
       training_graph = control_flow_ops.group(
           graph_builder.training_graph(
-              features, labels, input_weights=weights),
+              features, labels, input_weights=weights,
+              num_trainers=num_trainers,
+              trainer_id=trainer_id),
           state_ops.assign_add(contrib_framework.get_global_step(), 1))
+      loss_deps.append(training_graph)
+
+    training_loss = None
+    if (mode == model_fn_lib.ModeKeys.EVAL or
+        mode == model_fn_lib.ModeKeys.TRAIN):
+      with ops.control_dependencies(loss_deps):
+        training_loss = graph_builder.training_loss(
+            features, labels, name=LOSS_NAME)
     # Put weights back in
     if weights is not None:
       features[weights_name] = weights
@@ -169,7 +181,8 @@ class TensorForestEstimator(evaluable.Evaluable, trainable.Trainable):
   def __init__(self, params, device_assigner=None, model_dir=None,
                graph_builder_class=tensor_forest.RandomForestGraphs,
                config=None, weights_name=None, keys_name=None,
-               feature_engineering_fn=None, early_stopping_rounds=100):
+               feature_engineering_fn=None, early_stopping_rounds=100,
+               num_trainers=1, trainer_id=0):
 
     """Initializes a TensorForestEstimator instance.
 
@@ -196,6 +209,9 @@ class TensorForestEstimator(evaluable.Evaluable, trainable.Trainable):
         labels which will be fed into the model.
       early_stopping_rounds: Allows training to terminate early if the forest is
         no longer growing. 100 by default.
+      num_trainers: Number of training jobs, which will partition trees
+        among them.
+      trainer_id: Which trainer this instance is.
 
     Returns:
       A `TensorForestEstimator` instance.
@@ -206,7 +222,8 @@ class TensorForestEstimator(evaluable.Evaluable, trainable.Trainable):
     self.weights_name = weights_name
     self._estimator = estimator.Estimator(
         model_fn=get_model_fn(params, graph_builder_class, device_assigner,
-                              weights_name=weights_name, keys_name=keys_name),
+                              weights_name=weights_name, keys_name=keys_name,
+                              num_trainers=num_trainers, trainer_id=trainer_id),
         model_dir=model_dir,
         config=config,
         feature_engineering_fn=feature_engineering_fn)
@@ -216,6 +233,11 @@ class TensorForestEstimator(evaluable.Evaluable, trainable.Trainable):
   def model_dir(self):
     """See evaluable.Evaluable."""
     return self._estimator.model_dir
+
+  @property
+  def config(self):
+    """Get the underlying config object."""
+    return self._estimator.config
 
   def evaluate(self,
                x=None,
@@ -347,18 +369,15 @@ class TensorForestEstimator(evaluable.Evaluable, trainable.Trainable):
     # pylint: enable=protected-access
     return result
 
-  @experimental
   def export_savedmodel(self,
                         export_dir_base,
-                        input_fn,
+                        serving_input_fn,
                         default_output_alternative_key=None,
                         assets_extra=None,
-                        as_text=False,
-                        exports_to_keep=None):
+                        as_text=False):
     return self._estimator.export_savedmodel(
         export_dir_base,
-        input_fn,
+        serving_input_fn,
         default_output_alternative_key=default_output_alternative_key,
         assets_extra=assets_extra,
-        as_text=as_text,
-        exports_to_keep=exports_to_keep)
+        as_text=as_text)

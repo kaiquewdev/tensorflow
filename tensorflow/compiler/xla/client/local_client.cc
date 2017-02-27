@@ -67,35 +67,15 @@ bool ExecutableBuildOptions::has_hybrid_result() const {
 }
 
 namespace {
-
-// Convenience class which holds an acquired stream from the backend and
-// automatically releases it when destructed.
-class StreamManager {
- public:
-  static StatusOr<std::unique_ptr<StreamManager>> AcquireStream(
-      Backend* backend, int device_ordinal) {
-    TF_ASSIGN_OR_RETURN(
-        se::StreamExecutor * executor,
-        backend->stream_executor(device_ordinal == -1
-                                     ? backend->default_device_ordinal()
-                                     : device_ordinal));
-    TF_ASSIGN_OR_RETURN(std::unique_ptr<se::Stream> stream,
-                        backend->AcquireStream(executor));
-    return WrapUnique(new StreamManager(backend, std::move(stream)));
+StatusOr<Backend::StreamPtr> BorrowStreamForDevice(int device_ordinal,
+                                                   Backend* backend) {
+  if (device_ordinal < 0) {
+    device_ordinal = backend->default_device_ordinal();
   }
-
-  ~StreamManager() { backend_->ReleaseStream(std::move(stream_)); }
-
-  se::Stream* stream() const { return stream_.get(); }
-
- private:
-  StreamManager(Backend* backend, std::unique_ptr<se::Stream> stream)
-      : backend_(backend), stream_(std::move(stream)) {}
-
-  Backend* backend_;
-  std::unique_ptr<se::Stream> stream_;
-};
-
+  TF_ASSIGN_OR_RETURN(se::StreamExecutor * exec,
+                      backend->stream_executor(device_ordinal));
+  return backend->BorrowStream(exec);
+}
 }  // namespace
 
 LocalExecutable::LocalExecutable(std::unique_ptr<Executable> executable,
@@ -186,12 +166,11 @@ StatusOr<std::unique_ptr<ShapedBuffer>> LocalExecutable::Run(
   TF_RETURN_IF_ERROR(ValidateExecutionOptions(arguments, options));
 
   ExecutableRunOptions actual_options = options;
-  std::unique_ptr<StreamManager> acquired_stream;
+  Backend::StreamPtr stream;
   if (options.stream() == nullptr) {
     TF_ASSIGN_OR_RETURN(
-        acquired_stream,
-        StreamManager::AcquireStream(backend_, options.device_ordinal()));
-    actual_options.set_stream(acquired_stream->stream());
+        stream, BorrowStreamForDevice(options.device_ordinal(), backend_));
+    actual_options.set_stream(stream.get());
   }
   if (options.allocator() == nullptr) {
     actual_options.set_allocator(backend_->memory_allocator());
@@ -222,12 +201,11 @@ tensorflow::Status LocalExecutable::Run(
   }
 
   ExecutableRunOptions actual_options = options;
-  std::unique_ptr<StreamManager> acquired_stream;
+  Backend::StreamPtr stream;
   if (options.stream() == nullptr) {
     TF_ASSIGN_OR_RETURN(
-        acquired_stream,
-        StreamManager::AcquireStream(backend_, options.device_ordinal()));
-    actual_options.set_stream(acquired_stream->stream());
+        stream, BorrowStreamForDevice(options.device_ordinal(), backend_));
+    actual_options.set_stream(stream.get());
   }
   if (options.allocator() == nullptr) {
     actual_options.set_allocator(backend_->memory_allocator());
@@ -314,12 +292,23 @@ tensorflow::Status LocalClient::ExecuteLocally(
                                         options, result);
 }
 
-StatusOr<std::unique_ptr<AotCompilationResult>> LocalClient::CompileAheadOfTime(
-    const Computation& computation,
-    const tensorflow::gtl::ArraySlice<const Shape*> argument_layouts,
-    const Shape& result_layout, const AotCompilationOptions& options) {
-  return local_service_->CompileAheadOfTime(
-      computation.handle(), argument_layouts, result_layout, options);
+StatusOr<std::vector<std::unique_ptr<AotCompilationResult>>>
+LocalClient::CompileAheadOfTime(
+    const tensorflow::gtl::ArraySlice<AheadOfTimeComputationInstance>
+        computations,
+    const AotCompilationOptions& options) {
+  std::vector<LocalService::AheadOfTimeComputationInstance> service_instances;
+  service_instances.reserve(computations.size());
+  for (const AheadOfTimeComputationInstance& instance : computations) {
+    service_instances.push_back({});
+    LocalService::AheadOfTimeComputationInstance& service_instance =
+        service_instances.back();
+    TF_RET_CHECK(instance.computation != nullptr);
+    service_instance.computation = instance.computation->handle();
+    service_instance.argument_layouts = instance.argument_layouts;
+    service_instance.result_layout = instance.result_layout;
+  }
+  return local_service_->CompileAheadOfTime(service_instances, options);
 }
 
 int64 LocalClient::PointerSizeForTriple(tensorflow::StringPiece target_triple) {

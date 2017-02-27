@@ -25,6 +25,7 @@ limitations under the License.
 #include "tensorflow/compiler/aot/flags.h"
 #include "tensorflow/compiler/aot/tfcompile_util.h"
 #include "tensorflow/compiler/tf2xla/xla_compiler.h"
+#include "tensorflow/compiler/tf2xla/xla_op_registry.h"
 #include "tensorflow/compiler/xla/client/client_library.h"
 #include "tensorflow/compiler/xla/client/local_client.h"
 #include "tensorflow/compiler/xla/service/compiler.h"
@@ -204,23 +205,23 @@ Status RewriteAndPruneGraph(Graph* graph, const Config& config,
       string feed_id;
       TF_RETURN_IF_ERROR(GetNodeAttr(n->def(), kFeedIdAttr, &feed_id));
       if (missing_feeds.erase(feed_id) == 0) {
-        return errors::Aborted(kArgOp, " node found with unknown feed id: ",
-                               feed_id);
+        return errors::Aborted(kArgOp,
+                               " node found with unknown feed id: ", feed_id);
       }
     } else if (n->type_string() == kRetvalOp) {
       string fetch_id;
       TF_RETURN_IF_ERROR(GetNodeAttr(n->def(), kFetchIdAttr, &fetch_id));
       if (missing_fetches.erase(fetch_id) == 0) {
-        return errors::Aborted(kRetvalOp, " node found with unknown fetch id: ",
-                               fetch_id);
+        return errors::Aborted(kRetvalOp,
+                               " node found with unknown fetch id: ", fetch_id);
       }
     }
   }
   if (!missing_feeds.empty() || !missing_fetches.empty()) {
-    return errors::Aborted("Post graph-pruning", ", missing feeds: ",
-                           str_util::Join(missing_feeds, ", "),
-                           ", missing fetches: ",
-                           str_util::Join(missing_fetches, ", "));
+    return errors::Aborted(
+        "Post graph-pruning",
+        ", missing feeds: ", str_util::Join(missing_feeds, ", "),
+        ", missing fetches: ", str_util::Join(missing_fetches, ", "));
   }
   return Status::OK();
 }
@@ -262,8 +263,8 @@ Status CreateXlaArgs(const Graph& graph,
   TF_RETURN_IF_ERROR(CollectArgNodes(graph, &arg_nodes));
   for (const Node* node : arg_nodes) {
     XlaCompiler::Argument arg;
+    arg.kind = XlaCompiler::Argument::kParameter;
     TF_RETURN_IF_ERROR(GetNodeAttr(node->def(), "T", &arg.type));
-    TF_RETURN_IF_ERROR(GetNodeAttr(node->def(), "index", &arg.parameter));
     TF_RETURN_IF_ERROR(GetNodeAttr(node->def(), kShapeAttr, &arg.shape));
     TF_RETURN_IF_ERROR(GetNodeAttr(node->def(), kDebugNameAttr, &arg.name));
     xla_args->push_back(arg);
@@ -277,7 +278,7 @@ Status ConvertGraphToXla(xla::LocalClient* client, std::unique_ptr<Graph> graph,
                          const FunctionLibraryDefinition* flib_def,
                          xla::Computation* computation, bool* has_context_arg) {
   // Create a device and context to convert the graph into an XLA computation.
-  XlaOpRegistry::RegisterJitKernels();
+  XlaOpRegistry::RegisterCompilationKernels();
   // Populate the context with args from the graph.
   for (Node* node : graph->nodes()) {
     node->set_assigned_device_name(DEVICE_CPU_XLA_JIT);
@@ -351,16 +352,19 @@ Status CompileXla(xla::LocalClient* client, const xla::Computation& computation,
   for (int i = 0; i < pshape->parameters_size(); ++i) {
     arg_layouts.push_back(pshape->mutable_parameters(i));
   }
-  xla::StatusOr<std::unique_ptr<xla::AotCompilationResult>> aot_or =
-      client->CompileAheadOfTime(computation, arg_layouts, pshape->result(),
-                                 aot_opts);
+  xla::LocalClient::AheadOfTimeComputationInstance instance;
+  instance.computation = &computation;
+  instance.argument_layouts = std::move(arg_layouts);
+  instance.result_layout = &pshape->result();
+  xla::StatusOr<std::vector<std::unique_ptr<xla::AotCompilationResult>>>
+      aot_or = client->CompileAheadOfTime({instance}, aot_opts);
   if (!aot_or.ok()) {
     return errors::Unknown("XLA compilation failed: ",
                            aot_or.status().error_message());
   }
   compile_result->aot =
       xla::unique_ptr_static_cast<xla::cpu::CpuAotCompilationResult>(
-          aot_or.ConsumeValueOrDie());
+          std::move(aot_or.ValueOrDie().back()));
   compile_result->entry_point = aot_opts.entry_point_name();
   compile_result->pointer_size =
       xla::LocalClient::PointerSizeForTriple(aot_opts.triple());
